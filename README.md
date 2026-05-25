@@ -17,6 +17,18 @@ open http://localhost:8127
 
 The kit also nudges Claude (via `CLAUDE.md`) to announce at the start of each session that it is running under lapdog and to print the `sbx ports` command, so you don't need to remember it.
 
+### One-liner: launch + publish dashboard
+
+If you'd rather get the dashboard published from the start, chain the three commands. The first creates the sandbox and starts lapdog at boot, the second publishes the dashboard port to your host, the third attaches the agent:
+
+```bash
+sbx create --kit git+https://github.com/shelajev/lapdog-sbx-kit.git --name lapdog-claude claude . && \
+  sbx ports lapdog-claude --publish 8127:8127 && \
+  sbx run lapdog-claude
+```
+
+Open <http://localhost:8127> in your browser while the agent is running. To re-attach later, just `sbx run lapdog-claude` — the published port persists with the sandbox.
+
 ## Optional: forward to Datadog LLM Observability
 
 If you want spans to land in your Datadog account in addition to the local dashboard, store your Datadog API key as the `datadog` sandbox secret:
