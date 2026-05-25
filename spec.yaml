@@ -1,0 +1,92 @@
+schemaVersion: "1"
+kind: mixin
+name: lapdog-claude
+displayName: Lapdog for Claude Code
+description: Installs Datadog's lapdog (LLM observability) and transparently wraps `claude` so every prompt, tool call, and permission request is captured. Browse the local dashboard from your host via `sbx ports --publish 8127`. If you set the `datadog` secret on the host, lapdog also forwards to Datadog LLM Observability.
+
+commands:
+  install:
+    - command: "uv tool install ddapm-test-agent"
+      user: "1000"
+      description: Install lapdog (ddapm-test-agent) into the agent user's uv-managed tool dir
+    - command: |
+        set -eu
+        BIN="$HOME/.local/bin"
+        # First-time install: move the image's claude into claude.real. Idempotent.
+        if [ ! -e "$BIN/claude.real" ] && [ -e "$BIN/claude" ]; then
+          mv "$BIN/claude" "$BIN/claude.real"
+        fi
+        # Write/refresh the shim. Always overwrite so kit upgrades work.
+        cat > "$BIN/claude" <<'SH'
+        #!/bin/sh
+        # lapdog-kit shim: launches `lapdog claude` while keeping the real claude
+        # binary reachable as claude.real (so lapdog's internal `which claude`
+        # resolves to it instead of looping back into this shim).
+        set -eu
+
+        REAL="$HOME/.local/bin/claude.real"
+        if [ ! -e "$REAL" ]; then
+          echo "lapdog-kit: $REAL is missing — kit install did not complete." >&2
+          exit 1
+        fi
+
+        # Ensure the dashboard is reachable on a stable port even if the user
+        # didn't override WEB_UI_PORT from the kit's default.
+        export WEB_UI_PORT="${WEB_UI_PORT:-8127}"
+
+        # Expose claude.real as `claude` on PATH for lapdog's shutil.which.
+        SHADOW="/tmp/.lapdog-shim"
+        mkdir -p "$SHADOW"
+        ln -sfn "$REAL" "$SHADOW/claude"
+
+        # DD_API_KEY is unconditionally injected as a proxy-managed sentinel
+        # whenever the kit is attached, so we can't distinguish "secret set"
+        # from "secret not set" inside the VM. Always pass --forward: the
+        # egress proxy substitutes the real DD_API_KEY when configured; when
+        # it isn't, Datadog ingest rejects the request but local capture and
+        # the dashboard keep working.
+        exec env PATH="$SHADOW:$PATH" lapdog --forward claude "$@"
+        SH
+        chmod +x "$BIN/claude"
+      user: "1000"
+      description: Move real claude → claude.real and install the lapdog shim at ~/.local/bin/claude
+
+  startup:
+    # Login shells in this base image do not add ~/.local/bin to PATH, so call lapdog by absolute path.
+    # Boot with --forward so the running lapdog instance honors DD_API_KEY: cmd_claude reuses
+    # the already-running instance and would otherwise ignore --forward passed by the shim.
+    - command: ["sh", "-lc", "WEB_UI_PORT=${WEB_UI_PORT:-8127} $HOME/.local/bin/lapdog status >/dev/null 2>&1 || WEB_UI_PORT=${WEB_UI_PORT:-8127} $HOME/.local/bin/lapdog --forward start >/dev/null 2>&1 || true"]
+      description: Start lapdog (capture agent + dashboard, forwarding enabled) in the background (idempotent)
+    - command: ["sh", "-lc", "grep -q 'lapdog-kit-marker' CLAUDE.md 2>/dev/null || cat >> CLAUDE.md <<'EOF'\n\n<!-- lapdog-kit-marker -->\n## You are running under lapdog\n\nThis sandbox wraps `claude` with [lapdog](https://docs.datadoghq.com/llm_observability/lapdog/), which captures every prompt, tool call, and permission request locally.\n\n**At the start of every session, before doing anything else, tell the user:**\n\n> I'm running under lapdog. The local dashboard is on port 8127 inside this sandbox. From your host, expose it with:\n>\n> `sbx ports <sandbox-name> --publish 8127:8127`\n>\n> then open http://localhost:8127 in your browser to watch this session live.\n\nReplace `<sandbox-name>` with whatever the user named the sandbox (or omit `--name` to let `sbx ports` list them). If `DD_API_KEY` is set, lapdog is also forwarding spans to Datadog LLM Observability.\nEOF"]
+      description: Append a lapdog usage block to CLAUDE.md so the agent announces itself (idempotent)
+
+environment:
+  variables:
+    # Enables lapdog's built-in web dashboard alongside the capture agent on 8126.
+    WEB_UI_PORT: "8127"
+  proxyManaged:
+    - DD_API_KEY
+
+credentials:
+  sources:
+    datadog:
+      env:
+        - DD_API_KEY
+
+network:
+  allowedDomains:
+    # uv tool install ddapm-test-agent
+    - "pypi.org:443"
+    - "files.pythonhosted.org:443"
+    # Datadog LLM Observability intake (covers all DD_SITE variants — us1/us3/us5/eu1)
+    - "*.datadoghq.com:443"
+    - "*.datadoghq.eu:443"
+  serviceDomains:
+    api.datadoghq.com: datadog
+    instrumentation-telemetry-intake.datadoghq.com: datadog
+    llmobs-intake.datadoghq.com: datadog
+    trace.agent.datadoghq.com: datadog
+  serviceAuth:
+    datadog:
+      headerName: DD-API-KEY
+      valueFormat: "%s"
